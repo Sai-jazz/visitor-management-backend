@@ -709,6 +709,413 @@ app.post('/api/apartments/:apartmentId/residents/:residentId/generate-qr', async
     }
 });
 
+// =====================================================
+// SECURE ADMIN APIs (No direct Supabase access from frontend)
+// =====================================================
+
+// Admin Login
+app.post('/api/admin/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        
+        // Authenticate with Supabase Auth
+        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+            email, password
+        });
+        
+        if (authError) throw authError;
+        
+        // Get admin details
+        const { data: admin, error: adminError } = await supabase
+            .from('apartment_admins')
+            .select('*, apartments(*)')
+            .eq('auth_user_id', authData.user.id)
+            .single();
+        
+        if (adminError || !admin) {
+            return res.status(403).json({ success: false, error: 'Not authorized as admin' });
+        }
+        
+        res.json({
+            success: true,
+            admin: { id: admin.id, name: admin.name, email: admin.email },
+            apartment: admin.apartments
+        });
+        
+    } catch (error) {
+        res.status(401).json({ success: false, error: error.message });
+    }
+});
+
+// Get dashboard stats
+app.get('/api/admin/:apartmentId/stats', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        
+        const { count: totalResidents } = await supabase
+            .from('apartment_residents')
+            .select('*', { count: 'exact', head: true })
+            .eq('apartment_id', apartmentId)
+            .eq('is_active', true);
+        
+        const { count: activeGuards } = await supabase
+            .from('apartment_guards')
+            .select('*', { count: 'exact', head: true })
+            .eq('apartment_id', apartmentId)
+            .eq('is_active', true);
+        
+        const { data: activeEntries } = await supabase
+            .from('apartment_entry_logs')
+            .select('*')
+            .eq('apartment_id', apartmentId)
+            .is('exit_time', null);
+        
+        const visitorsInside = activeEntries?.filter(e => e.entry_type === 'visitor').length || 0;
+        const vehiclesInside = activeEntries?.filter(e => e.vehicle_number).length || 0;
+        
+        const { data: residentsWithVehicles } = await supabase
+            .from('apartment_residents')
+            .select('vehicle_number')
+            .eq('apartment_id', apartmentId)
+            .not('vehicle_number', 'is', null)
+            .not('vehicle_number', 'eq', '');
+        
+        res.json({
+            success: true,
+            stats: {
+                totalResidents: totalResidents || 0,
+                activeGuards: activeGuards || 0,
+                visitorsInside,
+                vehiclesInside,
+                totalVehicles: residentsWithVehicles?.length || 0
+            }
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get trends
+app.get('/api/admin/:apartmentId/trends', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        const days = parseInt(req.query.days) || 7;
+        
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - days);
+        
+        const { data: logs } = await supabase
+            .from('apartment_entry_logs')
+            .select('entry_time')
+            .eq('apartment_id', apartmentId)
+            .gte('entry_time', startDate.toISOString());
+        
+        const trends = {};
+        for (let i = days - 1; i >= 0; i--) {
+            const date = new Date();
+            date.setDate(date.getDate() - i);
+            trends[date.toISOString().split('T')[0]] = 0;
+        }
+        
+        logs?.forEach(log => {
+            const dateStr = new Date(log.entry_time).toISOString().split('T')[0];
+            if (trends[dateStr] !== undefined) trends[dateStr]++;
+        });
+        
+        res.json({ success: true, trends });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get entry methods
+app.get('/api/admin/:apartmentId/entry-methods', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        
+        const { data: logs } = await supabase
+            .from('apartment_entry_logs')
+            .select('entry_method')
+            .eq('apartment_id', apartmentId);
+        
+        const methods = { qr: 0, vehicle: 0, visitor_form: 0, manual: 0 };
+        logs?.forEach(log => {
+            if (log.entry_method === 'qr') methods.qr++;
+            else if (log.entry_method === 'vehicle') methods.vehicle++;
+            else if (log.entry_method === 'visitor_form') methods.visitor_form++;
+            else methods.manual++;
+        });
+        
+        res.json({ success: true, methods });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get recent activity
+app.get('/api/admin/:apartmentId/recent-activity', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        
+        const { data: logs } = await supabase
+            .from('apartment_entry_logs')
+            .select('*')
+            .eq('apartment_id', apartmentId)
+            .gte('entry_time', twentyFourHoursAgo)
+            .order('entry_time', { ascending: false })
+            .limit(20);
+        
+        res.json({ success: true, logs: logs || [] });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get guards
+app.get('/api/admin/:apartmentId/guards', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        
+        const { data: guards } = await supabase
+            .from('apartment_guards')
+            .select('*')
+            .eq('apartment_id', apartmentId)
+            .order('created_at', { ascending: false });
+        
+        res.json({ success: true, guards: guards || [] });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Create guard
+app.post('/api/admin/:apartmentId/guards', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        const { name, email, phone, shift, password } = req.body;
+        
+        // Create user in Supabase Auth
+        const { data: authUser, error: authError } = await supabase.auth.admin.createUser({
+            email, password, email_confirm: true
+        });
+        
+        if (authError) throw authError;
+        
+        // Add to apartment_guards
+        const { error: guardError } = await supabase
+            .from('apartment_guards')
+            .insert({
+                id: authUser.user.id,
+                apartment_id: apartmentId,
+                name, email, phone, shift,
+                is_active: true
+            });
+        
+        if (guardError) throw guardError;
+        
+        res.json({ success: true });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Delete guard
+app.delete('/api/admin/:apartmentId/guards/:guardId', async (req, res) => {
+    try {
+        const { guardId } = req.params;
+        
+        await supabase
+            .from('apartment_guards')
+            .update({ is_active: false })
+            .eq('id', guardId);
+        
+        res.json({ success: true });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get residents
+app.get('/api/admin/:apartmentId/residents', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        
+        const { data: residents } = await supabase
+            .from('apartment_residents')
+            .select('*')
+            .eq('apartment_id', apartmentId)
+            .eq('is_active', true)
+            .order('flat_number');
+        
+        res.json({ success: true, residents: residents || [] });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Create resident
+app.post('/api/admin/:apartmentId/residents', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        const { flat_number, name, phone, email, vehicle_number } = req.body;
+        
+        const { data: resident, error } = await supabase
+            .from('apartment_residents')
+            .insert({
+                apartment_id: apartmentId,
+                flat_number, name, phone, email, vehicle_number,
+                is_active: true
+            })
+            .select()
+            .single();
+        
+        if (error) throw error;
+        
+        // Generate QR code
+        const qrData = `RES:${resident.id}:${resident.flat_number}`;
+        const qrBuffer = await QRCode.toBuffer(qrData, { width: 500, margin: 2 });
+        const qrBase64 = qrBuffer.toString('base64');
+        const qrImageUrl = `data:image/png;base64,${qrBase64}`;
+        
+        await supabase
+            .from('apartment_residents')
+            .update({ qr_code_value: qrData, qr_code_url: qrImageUrl })
+            .eq('id', resident.id);
+        
+        res.json({ success: true, resident: { ...resident, qr_code_url: qrImageUrl } });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Delete resident
+app.delete('/api/admin/:apartmentId/residents/:residentId', async (req, res) => {
+    try {
+        const { residentId } = req.params;
+        
+        await supabase
+            .from('apartment_residents')
+            .update({ is_active: false })
+            .eq('id', residentId);
+        
+        res.json({ success: true });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Generate QR for resident
+app.post('/api/admin/:apartmentId/residents/:residentId/generate-qr', async (req, res) => {
+    try {
+        const { residentId } = req.params;
+        
+        const { data: resident, error } = await supabase
+            .from('apartment_residents')
+            .select('*')
+            .eq('id', residentId)
+            .single();
+        
+        if (error) throw error;
+        
+        const qrData = `RES:${resident.id}:${resident.flat_number}`;
+        const qrBuffer = await QRCode.toBuffer(qrData, { width: 500, margin: 2 });
+        const qrBase64 = qrBuffer.toString('base64');
+        const qrImageUrl = `data:image/png;base64,${qrBase64}`;
+        
+        await supabase
+            .from('apartment_residents')
+            .update({ qr_code_value: qrData, qr_code_url: qrImageUrl })
+            .eq('id', residentId);
+        
+        res.json({ success: true, qr_code_url: qrImageUrl });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get logs
+app.get('/api/admin/:apartmentId/logs', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        const limit = parseInt(req.query.limit) || 200;
+        
+        const { data: logs } = await supabase
+            .from('apartment_entry_logs')
+            .select('*')
+            .eq('apartment_id', apartmentId)
+            .order('entry_time', { ascending: false })
+            .limit(limit);
+        
+        res.json({ success: true, logs: logs || [] });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get analytics
+app.get('/api/admin/:apartmentId/analytics', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        const period = parseInt(req.query.period) || 7;
+        
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - period);
+        
+        const { data: logs } = await supabase
+            .from('apartment_entry_logs')
+            .select('*')
+            .eq('apartment_id', apartmentId)
+            .gte('entry_time', startDate.toISOString())
+            .order('entry_time', { ascending: true });
+        
+        res.json({ success: true, logs: logs || [] });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+
+
+// Debug endpoint - Check all vehicles in apartment
+app.get('/api/debug/apartment/:apartmentId/vehicles', async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        
+        const { data: vehicles } = await supabase
+            .from('apartment_residents')
+            .select('id, name, flat_number, vehicle_number, apartment_id')
+            .eq('apartment_id', apartmentId)
+            .not('vehicle_number', 'is', null);
+        
+        res.json({
+            success: true,
+            apartment_id: apartmentId,
+            vehicles: vehicles || []
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+
+
 // Start server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
