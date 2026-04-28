@@ -19,6 +19,70 @@ const supabase = createClient(
 
 console.log('🔌 Supabase initialized');
 
+
+// =====================================================
+// AUTH MIDDLEWARE - Verify JWT Token
+// =====================================================
+
+const verifyToken = async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const token = authHeader.split(' ')[1];
+    
+    try {
+        const { data: { user }, error } = await supabase.auth.getUser(token);
+        
+        if (error || !user) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+        
+        req.user = user;
+        next();
+    } catch (error) {
+        console.error('Token verification error:', error);
+        return res.status(401).json({ error: 'Authentication failed' });
+    }
+};
+
+// =====================================================
+// ADMIN PROFILE ENDPOINT (Required for React Admin Dashboard)
+// =====================================================
+
+app.get('/api/admin/profile', verifyToken, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        
+        console.log('🔍 Fetching admin profile for user:', userId);
+        
+        const { data: admin, error } = await supabase
+            .from('apartment_admins')
+            .select('*, apartments(*)')
+            .eq('auth_user_id', userId)
+            .single();
+        
+        if (error || !admin) {
+            console.log('❌ No admin found for user:', userId);
+            return res.status(403).json({ success: false, error: 'Not authorized as admin' });
+        }
+        
+        console.log('✅ Admin found:', admin.name);
+        
+        res.json({
+            success: true,
+            admin: { id: admin.id, name: admin.name, email: admin.email },
+            apartment: admin.apartments
+        });
+        
+    } catch (error) {
+        console.error('Admin profile error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // =====================================================
 // APARTMENT ENDPOINTS
 // =====================================================
