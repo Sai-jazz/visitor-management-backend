@@ -1178,6 +1178,159 @@ app.get('/api/debug/apartment/:apartmentId/vehicles', async (req, res) => {
 });
 
 
+// =====================================================
+// MASTER ADMIN ENDPOINTS
+// =====================================================
+
+// Get all apartment admins for an apartment
+app.get('/api/master/apartment-admins', verifyToken, async (req, res) => {
+    try {
+        const { apartmentId } = req.query;
+        const { data, error } = await supabase
+            .from('apartment_admins')
+            .select('*')
+            .eq('apartment_id', apartmentId);
+        if (error) throw error;
+        res.json({ success: true, admins: data || [] });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Create apartment admin
+app.post('/api/master/apartment-admins', verifyToken, async (req, res) => {
+    try {
+        const { name, email, phone, password, apartmentId } = req.body;
+        const { data: authUser, error: authError } = await supabase.auth.admin.createUser({
+            email, password, email_confirm: true
+        });
+        if (authError) throw authError;
+        const { error: adminError } = await supabase
+            .from('apartment_admins')
+            .insert({
+                id: authUser.user.id,
+                auth_user_id: authUser.user.id,
+                apartment_id: apartmentId,
+                name, email, phone,
+                is_active: true
+            });
+        if (adminError) throw adminError;
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Delete apartment admin
+app.delete('/api/master/apartment-admins/:adminId', verifyToken, async (req, res) => {
+    try {
+        const { adminId } = req.params;
+        await supabase.from('apartment_admins').delete().eq('id', adminId);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Delete apartment (cascade)
+app.delete('/api/apartments/:apartmentId', verifyToken, async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        await supabase.from('apartment_residents').delete().eq('apartment_id', apartmentId);
+        await supabase.from('apartment_guards').delete().eq('apartment_id', apartmentId);
+        await supabase.from('apartment_admins').delete().eq('apartment_id', apartmentId);
+        await supabase.from('apartment_visitors').delete().eq('apartment_id', apartmentId);
+        await supabase.from('apartment_entry_logs').delete().eq('apartment_id', apartmentId);
+        await supabase.from('apartment_pending_approvals').delete().eq('apartment_id', apartmentId);
+        await supabase.from('apartments').delete().eq('id', apartmentId);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+// =====================================================
+// MASTER ADMIN AUTHENTICATION
+// =====================================================
+
+// Master admin login check
+app.post('/api/master/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        
+        // Authenticate with Supabase Auth
+        const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+            email, password
+        });
+        
+        if (authError) throw authError;
+        
+        // Check if user is a master admin
+        const { data: masterAdmin, error: masterError } = await supabase
+            .from('master_admins')
+            .select('*')
+            .eq('auth_user_id', authData.user.id)
+            .eq('is_active', true)
+            .single();
+        
+        if (masterError || !masterAdmin) {
+            await supabase.auth.signOut();
+            return res.status(403).json({ success: false, error: 'Unauthorized: Master admin access only' });
+        }
+        
+        // Update last login
+        await supabase
+            .from('master_admins')
+            .update({ last_login: new Date() })
+            .eq('id', masterAdmin.id);
+        
+        res.json({
+            success: true,
+            masterAdmin: {
+                id: masterAdmin.id,
+                name: masterAdmin.name,
+                email: masterAdmin.email,
+                role: masterAdmin.role
+            }
+        });
+        
+    } catch (error) {
+        console.error('Master login error:', error);
+        res.status(401).json({ success: false, error: error.message });
+    }
+});
+
+// Get master admin profile
+app.get('/api/master/profile', verifyToken, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        
+        const { data: masterAdmin, error } = await supabase
+            .from('master_admins')
+            .select('*')
+            .eq('auth_user_id', userId)
+            .eq('is_active', true)
+            .single();
+        
+        if (error || !masterAdmin) {
+            return res.status(403).json({ success: false, error: 'Not authorized as master admin' });
+        }
+        
+        res.json({
+            success: true,
+            masterAdmin: {
+                id: masterAdmin.id,
+                name: masterAdmin.name,
+                email: masterAdmin.email,
+                role: masterAdmin.role
+            }
+        });
+        
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
 
 // Start server
