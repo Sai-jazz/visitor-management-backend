@@ -1027,10 +1027,29 @@ app.get('/api/admin/:apartmentId/residents', async (req, res) => {
 });
 
 // Create resident
-app.post('/api/admin/:apartmentId/residents', async (req, res) => {
+// Create resident (with duplicate check)
+app.post('/api/admin/:apartmentId/residents', verifyToken, async (req, res) => {
     try {
         const { apartmentId } = req.params;
         const { flat_number, name, phone, email, vehicle_number } = req.body;
+        
+        if (!flat_number || !name || !phone) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+        
+        // Check if resident with same flat_number already exists in this apartment
+        const { data: existingResident, error: checkError } = await supabase
+            .from('apartment_residents')
+            .select('id')
+            .eq('apartment_id', apartmentId)
+            .eq('flat_number', flat_number)
+            .maybeSingle();
+        
+        if (existingResident) {
+            return res.status(409).json({ 
+                error: `Flat number "${flat_number}" already exists in this apartment. Please use a different flat number.` 
+            });
+        }
         
         const { data: resident, error } = await supabase
             .from('apartment_residents')
@@ -1058,7 +1077,12 @@ app.post('/api/admin/:apartmentId/residents', async (req, res) => {
         res.json({ success: true, resident: { ...resident, qr_code_url: qrImageUrl } });
         
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Create resident error:', error);
+        if (error.code === '23505') {
+            res.status(409).json({ error: 'Flat number already exists in this apartment' });
+        } else {
+            res.status(500).json({ error: error.message });
+        }
     }
 });
 
