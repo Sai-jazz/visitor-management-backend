@@ -1357,6 +1357,91 @@ app.get('/api/master/profile', verifyToken, async (req, res) => {
 });
 
 
+// =====================================================
+// REGULAR VISITORS ENDPOINTS
+// =====================================================
+
+// Get all regular visitors for an apartment
+app.get('/api/apartments/:apartmentId/regular-visitors', verifyToken, async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        const { data, error } = await supabase
+            .from('apartment_regular_visitors')
+            .select('*')
+            .eq('apartment_id', apartmentId)
+            .eq('is_active', true)
+            .order('name');
+        if (error) throw error;
+        res.json({ success: true, visitors: data || [] });
+    } catch (error) {
+        console.error('Error fetching regular visitors:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Create regular visitor
+app.post('/api/apartments/:apartmentId/regular-visitors', verifyToken, async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        const { name, phone, email, purpose, days, visit_time } = req.body;
+        if (!name || !phone) return res.status(400).json({ error: 'Name and phone are required' });
+        
+        const { data: existing } = await supabase
+            .from('apartment_regular_visitors')
+            .select('id')
+            .eq('apartment_id', apartmentId)
+            .eq('phone', phone)
+            .maybeSingle();
+        if (existing) return res.status(409).json({ error: 'Regular visitor with this phone already exists' });
+        
+        const { data, error } = await supabase
+            .from('apartment_regular_visitors')
+            .insert({ apartment_id: apartmentId, name, phone, email, purpose, days: days || [], visit_time, is_active: true })
+            .select()
+            .single();
+        if (error) throw error;
+        res.json({ success: true, visitor: data });
+    } catch (error) {
+        console.error('Error creating regular visitor:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Delete regular visitor
+app.delete('/api/apartments/:apartmentId/regular-visitors/:visitorId', verifyToken, async (req, res) => {
+    try {
+        const { visitorId } = req.params;
+        await supabase.from('apartment_regular_visitors').update({ is_active: false }).eq('id', visitorId);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting regular visitor:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Search regular visitors
+app.get('/api/apartments/:apartmentId/regular-visitors/search', verifyToken, async (req, res) => {
+    try {
+        const { apartmentId } = req.params;
+        const { q } = req.query;
+        if (!q) return res.json({ success: true, visitors: [] });
+        const { data, error } = await supabase
+            .from('apartment_regular_visitors')
+            .select('*')
+            .eq('apartment_id', apartmentId)
+            .eq('is_active', true)
+            .or(`name.ilike.%${q}%,phone.ilike.%${q}%`)
+            .limit(10);
+        if (error) throw error;
+        res.json({ success: true, visitors: data || [] });
+    } catch (error) {
+        console.error('Error searching regular visitors:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+
 // Start server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
